@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/clientcmd"
@@ -28,6 +29,8 @@ import (
 	clientcmdlatest "k8s.io/client-go/tools/clientcmd/api/latest"
 	kubeconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/kubeconfig"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/util/certs"
+	kcfg "sigs.k8s.io/cluster-api/util/kubeconfig"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -39,6 +42,21 @@ import (
 
 func (scope *kmcScope) reconcileKubeConfigSecret(ctx context.Context, managementClusterClient client.Client, kmc *km.Cluster) error {
 	logger := log.FromContext(ctx)
+
+	var existing v1.Secret
+	err := managementClusterClient.Get(ctx, client.ObjectKey{Name: kmc.GetAdminConfigSecretName(), Namespace: kmc.Namespace}, &existing)
+	if err != nil && !apierrors.IsNotFound(err) {
+		scope.currentReconcileState.controlplane.kubeconfig.message = err.Error()
+		return err
+	}
+	if err == nil {
+		needsRotation, rotErr := kcfg.NeedsClientCertRotation(&existing, certs.ClientCertificateRenewalDuration)
+		if rotErr == nil && !needsRotation {
+			scope.currentReconcileState.controlplane.kubeconfig.data = existing.DeepCopy()
+			return nil
+		}
+	}
+
 	pod, err := findStatefulSetPod(ctx, kmc.GetStatefulSetName(), kmc.Namespace, scope.clienSet)
 	if err != nil {
 		scope.currentReconcileState.controlplane.kubeconfig.message = err.Error()
